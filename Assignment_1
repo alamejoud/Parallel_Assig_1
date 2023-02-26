@@ -1,0 +1,157 @@
+#include <mpi.h>
+#include <stdlib.h>
+#include <stdio.h>
+#include <math.h>
+
+#define WIDTH 1000
+#define HEIGHT 1000
+#define MAX_ITERATIONS 10000
+
+typedef struct {
+    unsigned char r, g, b;
+} color_t;
+
+typedef struct {
+    double real;
+    double imag;
+} Complex;
+
+color_t get_color(int iter) {
+    color_t color;
+    if (iter == MAX_ITERATIONS) {
+        color.r = color.g = color.b = 0;
+    } else {
+        color.r = (iter / 255)  % 256;
+        color.g = (iter ) % 256;
+        color.b = (iter * 4) % 256;
+    }
+    return color;
+}
+
+void write_bitmap(color_t *bitmap, const char *filename) {
+    FILE *f = fopen(filename, "wb");
+    fprintf(f, "P6\n%d %d\n255\n", WIDTH, HEIGHT);
+    fwrite(bitmap, sizeof(color_t), WIDTH * HEIGHT, f);
+    fclose(f);
+}
+
+int mandelbrot(Complex c) {
+    Complex z = {0, 0};
+    int iterations = 0;
+    while (iterations < MAX_ITERATIONS && z.real*z.real + z.imag*z.imag < 4) {
+        Complex temp = {z.real*z.real - z.imag*z.imag + c.real, 2*z.real*z.imag + c.imag};
+        z = temp;
+        iterations += 5;
+    }
+    return iterations;
+}
+
+void sf(){		 
+    
+    int rank, size;
+    
+    MPI_Comm_rank(MPI_COMM_WORLD, &rank);
+    MPI_Comm_size(MPI_COMM_WORLD, &size);
+
+    int chunk = HEIGHT / size;
+    int start = rank * chunk;
+    int end = start + chunk;
+
+    color_t *temp= malloc(sizeof(color_t) * WIDTH * chunk);
+
+    int x, y;
+    for (y = start; y < end; y++) {
+        for (x = 0; x < WIDTH; x++) {
+            double cx = (double) -2 + (double) x * 4 / WIDTH;
+	    double cy = (double) -2 + (double) y * 4 / HEIGHT;
+            Complex c ={cx, cy};
+            
+            int iter = mandelbrot(c);
+            color_t color = get_color(iter);
+            temp[(y - start) * WIDTH + x] = color;
+        }
+    }
+
+    color_t *image = NULL;
+    if (rank == 0) {
+        image = malloc(sizeof(color_t) * WIDTH * HEIGHT);
+    }
+    MPI_Gather(temp, sizeof(color_t) * WIDTH * chunk, MPI_BYTE,
+               image, sizeof(color_t) * WIDTH * chunk, MPI_BYTE,
+               0, MPI_COMM_WORLD);
+
+    if (rank == 0) {
+        write_bitmap(image, "mandelbrot.bmp");
+        free(image);
+    }
+    free(temp);
+
+    MPI_Finalize();
+}
+
+void df() {
+
+	int rank, size;
+    
+    	MPI_Comm_rank(MPI_COMM_WORLD, &rank);
+    	MPI_Comm_size(MPI_COMM_WORLD, &size);
+	color_t *image = NULL;
+	
+	if (rank == 0) {
+		image = malloc(sizeof(color_t) * WIDTH * HEIGHT);
+		int count = 0;
+		int row = 0; 
+		for (int k = 1; k < size; k++) {
+			MPI_Send(&row, sizeof(int), MPI_INT, k, 0, MPI_COMM_WORLD);
+			count++; 
+			row++; 
+		}
+		do {
+			MPI_Status status;
+			MPI_Status status2;
+			int y;
+			color_t *r = malloc(sizeof(color_t) * WIDTH);
+			MPI_Recv(&r, sizeof(color_t) * WIDTH, MPI_BYTE, MPI_ANY_SOURCE, 1, MPI_COMM_WORLD, &status);
+			MPI_Recv(&y, sizeof(int), MPI_INT, status.MPI_SOURCE, 3, MPI_COMM_WORLD, &status2);
+			printf("%d ", y);
+			count--; 
+			if (row < HEIGHT) {
+				MPI_Send(&row, sizeof(int), MPI_INT, status.MPI_SOURCE, 0, MPI_COMM_WORLD); 
+				row++; 
+				count++;
+			} else
+				MPI_Send(&row, sizeof(int), MPI_INT, status.MPI_SOURCE, 2, MPI_COMM_WORLD);
+			
+		} while (count > 0);
+		write_bitmap(image, "mandelbrot2.bmp");
+        	free(image);
+	}
+	else {
+		int y;
+		MPI_Status status;
+		MPI_Recv(&y, sizeof(int), MPI_INT, 0, MPI_ANY_TAG, MPI_COMM_WORLD, &status);
+		while (status.MPI_TAG == 0) {
+			color_t *color = malloc(sizeof(color_t) * WIDTH);
+			Complex c = {0, 0};
+			c.imag = (double) -2 + (double) y * 4 / HEIGHT;
+			for (int x = 0; x < WIDTH; x++) { 
+				c.real = (double) -2 + (double) x * 4 / WIDTH;
+				color[x] = get_color(mandelbrot(c));
+			}
+			MPI_Send(color, sizeof(color_t) * WIDTH, MPI_BYTE, 0, 1, MPI_COMM_WORLD);
+			MPI_Send(&y, sizeof(int), MPI_INT, 0, 3, MPI_COMM_WORLD);
+			MPI_Recv(&y, sizeof(int), MPI_INT, 0, MPI_ANY_TAG, MPI_COMM_WORLD, &status);
+		}
+	}
+	
+	MPI_Finalize();
+}
+
+int main(int argc, char** argv) {
+
+    MPI_Init(&argc, &argv);
+    sf();
+    //df();
+    
+    return 0;
+}
